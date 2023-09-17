@@ -2,7 +2,6 @@
 pragma solidity >=0.8.0 <0.9.0;
 
 import "./Plan.sol";
-import "./Referral.sol";
 import "./Utils.sol";
 
 contract Referral {
@@ -34,9 +33,10 @@ contract Referral {
     function rewardReferral(address referral, uint _value) public {
         uint reward;
         for (uint index; index < referralLevel.length; index++) {
-            reward = referralLevel[index];
-
             if (users[referral].referral == address(0)) continue;
+
+            reward = (referralReward[referralLevel[index]] * 100) / _value;
+            if (reward <= 0) continue;
 
             _rewardReferral(referral, reward);
             referral = users[referral].referral;
@@ -103,12 +103,14 @@ contract Investment is Plan, Referral, Utils {
         _;
     }
 
+    // return all investors' investments IDs
     function getUserInvestmentsID(
         address investor
     ) public view returns (uint[] memory) {
         return users[investor].investmentsID;
     }
 
+    // return all investors' investments
     function getInvestments(
         address investor
     ) external view returns (UserInvestment[] memory userInvestments) {
@@ -131,14 +133,11 @@ contract Investment is Plan, Referral, Utils {
         return userInvestments;
     }
 
+    // get a single investment
     function getInvestment(
         address investor,
         uint investmentID
     ) public view returns (UserInvestment memory) {
-        /*
-        return user investment
-        revert if the investment ID passed is not valid
-        */
         uint invesmentCounts = users[investor].investmentsID.length;
         require(investmentID > 0, "invalid investmentID");
         require(investmentID <= invesmentCounts, "invalid investmentID");
@@ -204,19 +203,26 @@ contract Investment is Plan, Referral, Utils {
         if (!users[investor].created) {
             users[investor].created = true;
             users[investor].referral = referral;
-
-            if (setting.rewardReferralOnce) {
-                rewardReferral(referral, msg.value);
-                return;
-            }
         }
-
+        referral = users[investor].referral;
         // don't reward self referral or genesis referral (meaning, not refered)
         if (referral == address(0) || referral == msg.sender) return;
-        // if referralContiniousReward is not allowed, return if the user account is not new
-        if (!setting.referralContiniousReward) return;
 
-        rewardReferral(referral, msg.value);
+        uint percentToRemove;
+        for (uint l; l < referralLevel.length; l++) {
+            percentToRemove += referralReward[referralLevel[l]];
+        }
+
+        uint toShare = (percentToRemove / 100) * msg.value;
+        // if (setting.rewardReferralOnce) {
+        //     rewardReferral(referral, msg.value);
+        //     return;
+        // }
+
+        // // if referralContiniousReward is not allowed, return if the user account is not new
+        // if (!setting.referralContiniousReward) return;
+
+        rewardReferral(referral, toShare);
     }
 
     function _withdrawEarning(
