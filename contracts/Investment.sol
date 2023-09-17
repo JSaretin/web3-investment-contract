@@ -12,7 +12,12 @@ contract Investment is Plan, Referral, Utils {
         uint amount
     );
 
+    error InvestmentAlreadyClosed(uint investmentID);
     error InvestedAmountIsTooSmall(uint investedAmount, uint minInvestment);
+    error CoinInActiveTrade(uint contractBalance, uint withdrawAmount);
+    error AddressNotAllowed(address walletAddrss);
+    error InvestmentEarningsTooLow(uint amount, uint earnings);
+    error OwnerOnly();
 
     event CloseInvestment(address indexed investor, uint investmentID);
 
@@ -146,58 +151,78 @@ contract Investment is Plan, Referral, Utils {
         uint investmentID,
         uint amount
     ) internal {
+        // check if the contract balance is enough to complete the requested
+        // withdraw and continue, else revert transaction
+
         uint contractBalance = address(this).balance;
-        require(
-            contractBalance >= amount,
-            "can't complete the withdraw: coin are in active trade. Try again"
-        );
+        if (contractBalance < amount)
+            revert CoinInActiveTrade({
+                contractBalance: contractBalance,
+                withdrawAmount: amount
+            });
 
         usersInvestments[investor][investmentID].withdrawnAmount += amount;
         users[investor].totalWithdrawn += amount;
-        payable(to).transfer(amount);
+
         emit WithdrawReward(investor, to, amount);
+        payable(to).transfer(amount);
     }
 
     // user can withdraw their investment earning to any wallet
     // this function will get the investment earning with the function that
     // calculate the reward based on the duration of the investment and the amount
     function withdrawReward(uint investmentID, uint amount, address to) public {
-        require(to != address(0), "address not allowed");
+        // investor is not allowed to withdraw to genesis address
+        if (to == address(0)) revert AddressNotAllowed(to);
         UserInvestment memory investment = getInvestment(
             msg.sender,
             investmentID
         );
-        uint investmentEarning = getInvestmentEarning(investment);
-        require(
-            (investmentEarning - investment.withdrawnAmount) >= amount,
-            "not enough earnings to withdraw"
-        );
+        uint investmentEarning = getInvestmentEarning(investment) -
+            investment.withdrawnAmount;
+
+        // get investment earning and remove the investors' previous withdrawal total
+        // to get the current amount the investor can withdraw and check it the amount
+        // is up to the amount the investor is trying to withdraw before proceeding, or revert
+        if (investmentEarning < amount)
+            revert InvestmentEarningsTooLow(amount, investmentEarning);
+
         _withdrawEarning(msg.sender, to, investmentID, amount);
     }
 
+    // close active investment and return investor deposit and earnings
     function closeInvestment(uint investmentID) public {
         UserInvestment memory userInvestment = getInvestment(
             msg.sender,
             investmentID
         );
 
-        require(userInvestment.isActive, "investment already closed");
-        usersInvestments[msg.sender][investmentID].isActive = false; // close early incase user recall the function
+        // check if investor already ended this investment
+        if (!userInvestment.isActive)
+            revert InvestmentAlreadyClosed(investmentID);
+
+        // close early incase user recall the function
+        usersInvestments[msg.sender][investmentID].isActive = false;
 
         uint investmentEarning = getInvestmentEarning(userInvestment);
         uint leftEarning = investmentEarning - userInvestment.withdrawnAmount;
-        uint payout = leftEarning + userInvestment.deposit;
-
+        uint totalToWithdraw = leftEarning + userInvestment.deposit;
         uint contractBalance = address(this).balance;
-        require(
-            contractBalance >= payout,
-            "can't close investment now: coin are in trade"
-        );
+
+        // check if the smart contract balance is enough to close this investment
+        // and repay user earning and deposit
+        if (contractBalance < totalToWithdraw)
+            revert CoinInActiveTrade({
+                contractBalance: contractBalance,
+                withdrawAmount: totalToWithdraw
+            });
+
+        // remove user earning before closing investment
         if (leftEarning > 0) {
             _withdrawEarning(msg.sender, msg.sender, investmentID, leftEarning);
         }
-        payable(msg.sender).transfer(payout);
         emit CloseInvestment(msg.sender, investmentID);
+        payable(msg.sender).transfer(userInvestment.deposit);
     }
 
     receive() external payable {}
