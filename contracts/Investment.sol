@@ -5,22 +5,48 @@ import "./Plan.sol";
 import "./Referral.sol";
 import "./Utils.sol";
 
+contract Referral {
+    event RewardedReferral(address indexed referral, uint amount);
+
+    struct User {
+        uint[] investmentsID;
+        uint referralReward;
+        uint totalWithdrawn;
+        uint totalInvested;
+        uint activeInvestments;
+        uint closedInvestments;
+        address referral;
+        bool created;
+    }
+
+    mapping(address => User) users;
+    mapping(uint => uint) referralReward;
+
+    uint[] public referralLevel;
+
+    function _rewardReferral(address referral, uint amount) internal {
+        if (address(this).balance < amount) return;
+        users[referral].referralReward += amount;
+        payable(referral).transfer(amount);
+        emit RewardedReferral(referral, amount);
+    }
+
+    function rewardReferral(address referral, uint _value) public {
+        uint reward;
+        for (uint index; index < referralLevel.length; index++) {
+            reward = referralLevel[index];
+
+            if (users[referral].referral == address(0)) continue;
+
+            _rewardReferral(referral, reward);
+            referral = users[referral].referral;
+        }
+    }
+
+    function getReferralEarnings(address referral) public view returns (uint) {}
+}
+
 contract Investment is Plan, Referral, Utils {
-    event WithdrawReward(
-        address indexed investor,
-        address indexed to,
-        uint amount
-    );
-
-    error InvestmentAlreadyClosed(uint investmentID);
-    error InvestedAmountIsTooSmall(uint investedAmount, uint minInvestment);
-    error CoinInActiveTrade(uint contractBalance, uint withdrawAmount);
-    error AddressNotAllowed(address walletAddrss);
-    error InvestmentEarningsTooLow(uint amount, uint earnings);
-    error OwnerOnly();
-
-    event CloseInvestment(address indexed investor, uint investmentID);
-
     struct UserInvestment {
         uint id;
         uint planID;
@@ -32,17 +58,50 @@ contract Investment is Plan, Referral, Utils {
         uint earnings;
     }
 
-    struct User {
-        uint[] investmentsID;
-        uint referralReward;
-        uint totalWithdrawn;
-        uint totalInvested;
-        uint activeInvestments;
-        uint closedInvestments;
+    struct Setting {
+        bool referralContiniousReward;
+        bool rewardReferralOnce;
+        bool pauseAll;
+        bool pauseWithdraw;
+        bool pauseDeposit;
     }
 
-    mapping(address => User) users;
+    event WithdrawReward(
+        address indexed investor,
+        address indexed to,
+        uint amount
+    );
+
+    event CloseInvestment(address indexed investor, uint investmentID);
+    error InvestmentAlreadyClosed(uint investmentID);
+    error InvestedAmountIsTooSmall(uint investedAmount, uint minInvestment);
+    error CoinInActiveTrade(uint contractBalance, uint withdrawAmount);
+    error AddressNotAllowed(address walletAddrss);
+    error InvestmentEarningsTooLow(uint amount, uint earnings);
+    error OwnerOnly();
+
+    error DepositNotAllowed();
+    error WithdrawNotAllowed();
+    error NoActivityAllowed();
+
     mapping(address => mapping(uint => UserInvestment)) usersInvestments;
+
+    Setting setting;
+
+    modifier depositAllowed() {
+        if (setting.pauseDeposit) revert DepositNotAllowed();
+        _;
+    }
+
+    modifier withdrawAllowed() {
+        if (setting.pauseWithdraw) revert WithdrawNotAllowed();
+        _;
+    }
+
+    modifier activityAllowed() {
+        if (setting.pauseAll) revert NoActivityAllowed();
+        _;
+    }
 
     function getUserInvestmentsID(
         address investor
@@ -107,19 +166,24 @@ contract Investment is Plan, Referral, Utils {
     // and reward the referral if the investor is new to the platform, else
     // we know the the person have previously invested and no need to reward
     // the referral.
-    function invest(uint planID, address referral) public payable {
+    function invest(
+        uint planID,
+        address referral
+    ) public payable depositAllowed activityAllowed {
         AvailiblePlan memory plan = getPlan(planID);
         if (msg.value < plan.minDeposit)
             revert InvestedAmountIsTooSmall({
                 investedAmount: msg.value,
                 minInvestment: plan.minDeposit
             });
+
+        address investor = msg.sender;
         // create new ID for the the new investment by getting all user investments
         // count and add 1 to it
-        uint newInvestmentID = users[msg.sender].investmentsID.length + 1;
+        uint newInvestmentID = users[investor].investmentsID.length + 1;
 
         // save the investment
-        usersInvestments[msg.sender][newInvestmentID] = UserInvestment({
+        usersInvestments[investor][newInvestmentID] = UserInvestment({
             id: newInvestmentID,
             planID: planID,
             deposit: msg.value,
@@ -130,19 +194,29 @@ contract Investment is Plan, Referral, Utils {
             earnings: 0
         });
         // send the investment ID
-        users[msg.sender].investmentsID.push(newInvestmentID);
-        users[msg.sender].totalInvested += msg.value;
+        users[investor].investmentsID.push(newInvestmentID);
+        users[investor].totalInvested += msg.value;
 
         // check continous referral is open, then reward the referral for every investment
         // made by the investor, else check if reward once is enable and reward the referral
         // for newly register investor.
 
-        if (referrals[msg.sender].created) return;
-        referrals[msg.sender].created = true;
-        if (referral == address(0) || referral == msg.sender) return;
+        if (!users[investor].created) {
+            users[investor].created = true;
+            users[investor].referral = referral;
 
-        referrals[msg.sender].referral = referral;
-        rewardReferral(referral);
+            if (setting.rewardReferralOnce) {
+                rewardReferral(referral, msg.value);
+                return;
+            }
+        }
+
+        // don't reward self referral or genesis referral (meaning, not refered)
+        if (referral == address(0) || referral == msg.sender) return;
+        // if referralContiniousReward is not allowed, return if the user account is not new
+        if (!setting.referralContiniousReward) return;
+
+        rewardReferral(referral, msg.value);
     }
 
     function _withdrawEarning(
@@ -171,7 +245,11 @@ contract Investment is Plan, Referral, Utils {
     // user can withdraw their investment earning to any wallet
     // this function will get the investment earning with the function that
     // calculate the reward based on the duration of the investment and the amount
-    function withdrawReward(uint investmentID, uint amount, address to) public {
+    function withdrawReward(
+        uint investmentID,
+        uint amount,
+        address to
+    ) public withdrawAllowed activityAllowed {
         // investor is not allowed to withdraw to genesis address
         if (to == address(0)) revert AddressNotAllowed(to);
         UserInvestment memory investment = getInvestment(
@@ -191,7 +269,9 @@ contract Investment is Plan, Referral, Utils {
     }
 
     // close active investment and return investor deposit and earnings
-    function closeInvestment(uint investmentID) public {
+    function closeInvestment(
+        uint investmentID
+    ) public withdrawAllowed activityAllowed {
         UserInvestment memory userInvestment = getInvestment(
             msg.sender,
             investmentID
